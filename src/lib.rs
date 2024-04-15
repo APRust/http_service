@@ -5,34 +5,23 @@ use std::{
 
 pub struct ThreadPool {
     threads: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
-}
-
-struct Worker {
-    id: usize,
-    thread: thread::JoinHandle<()>,
-}
-impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
-        let thread = thread::spawn(move || loop {
-            {
-                let job = receiver.lock().unwrap().recv().unwrap();
-
-                println!("Worker with id: {} receive job. Executing...", id);
-
-                job();
-            }
-        });
-
-        Worker {
-            id: id,
-            thread: thread,
-        }
-    }
+    sender: Option<mpsc::Sender<Job>>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in &mut self.threads {
+            println!("Shutting down worker with id: {}", worker.id);
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
 impl ThreadPool {
     /// Create a new ThreadPool.
     ///
@@ -54,7 +43,7 @@ impl ThreadPool {
         }
         ThreadPool {
             threads: workers,
-            sender,
+            sender: Some(sender),
         }
     }
 
@@ -62,6 +51,35 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.sender.send(Box::new(f)).unwrap()
+        let job = Box::new(f);
+        self.sender.as_ref().unwrap().send(job).unwrap()
+    }
+}
+struct Worker {
+    id: usize,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl Worker {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
+        let thread = thread::spawn(move || loop {
+            {
+                let message = receiver.lock().unwrap().recv();
+                match message {
+                    Ok(job) => {
+                        println!("Worker with id: {} receive job. Executing...", id);
+                        job();
+                    }
+                    Err(_) => {
+                        println!("Worker with id: {} is disconnected! Shutting down", id);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Worker {
+            id,
+            thread: Some(thread),
+        }
     }
 }
